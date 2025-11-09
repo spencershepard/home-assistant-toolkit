@@ -1,48 +1,48 @@
 # Raspberry Pi 3 optimized requirements for STT system
-# Core audio processing
+# Minimal set of dependencies for core functionality
+
+# Core audio processing (REQUIRED)
 sounddevice==0.5.2
 soundfile==0.13.1
+numpy==1.24.4
 
-# Wake word detection
+# Wake word detection (REQUIRED)
 pvporcupine==3.0.5
-pvrecorder==1.2.7
 
-# Speech-to-text (lighter version for RPi)
+# Speech-to-text (REQUIRED)
 faster-whisper==1.2.0
-ctranslate2==4.6.0
 
-# HTTP requests
+# HTTP requests (REQUIRED)
 requests==2.32.5
-certifi==2025.8.3
-urllib3==2.5.0
-charset-normalizer==3.4.3
-idna==3.10
 
-# Utilities
+# Utilities (REQUIRED)
 python-dotenv==1.0.1
-colorama==0.4.6
-packaging==25.0
 
-# Optional: PyTorch (CPU-only, lighter for RPi 3)
-# Uncomment these if you want PyTorch-based features (VAD, etc.)
+# Support libraries automatically installed by above packages
+# (No need to specify versions - let pip resolve dependencies)
+# - ctranslate2 (required by faster-whisper)
+# - certifi, urllib3, charset-normalizer, idna (required by requests)
+# - cffi, pycparser (required by sounddevice)
+# - colorama (cross-platform colored terminal text)
+# - packaging (package version handling)
+
+# =====================================
+# OPTIONAL FEATURES (uncomment if needed)
+# =====================================
+
+# PyTorch-based features (Advanced VAD, etc.)
+# WARNING: Large download and compilation time on RPi
 # torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
 # torchaudio==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
 
-# Optional: Speaker identification (resource intensive - may not work well on RPi 3)
-# Uncomment only if you have sufficient resources and need speaker ID
+# Speaker identification (Very resource intensive - not recommended for RPi 3)
 # resemblyzer==0.1.4
 # librosa==0.10.2
 # scikit-learn==1.3.2
 # scipy==1.11.4
-# joblib==1.3.2
-# decorator==5.2.1
-# numba==0.58.1
-# llvmlite==0.41.1
 
-# Audio codecs
-av==15.1.0
-cffi==2.0.0
-pycparser==2.23
+# Additional Porcupine features
+# pvrecorder==1.2.7  # Only needed if using pvrecorder instead of sounddevice
 
-# Platform detection
-# Built-in: platform, os, wave, threading, concurrent.futures, base64, datetime, json
+# Built-in Python modules (no installation needed):
+# platform, os, wave, threading, concurrent.futures, base64, datetime, json
