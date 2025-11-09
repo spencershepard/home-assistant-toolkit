@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Live Canvas</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: {
+              50: '#f8fafc',
+              100: '#f1f5f9',
+              200: '#e2e8f0',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            },
+            secondary: {
+              400: '#a5b4fc',
+              500: '#818cf8',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    
+    body {
+      transition: background-color 0.3s ease;
+    }
+    
+    .animate-pulse {
+      animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: .5;
+      }
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex flex-col font-sans text-slate-900 selection:bg-primary-100">
+  <header class="bg-white/70 backdrop-blur-sm border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+    <div class="container mx-auto px-4 h-16 md:h-20 flex items-center justify-between">
+      <h1 class="text-xl md:text-2xl font-bold text-slate-800">
+        Live Canvas <span class="text-primary-600">MCP</span>
+      </h1>
+      <div class="flex items-center">
+        <div class="h-2 w-2 bg-primary-500 rounded-full animate-pulse mr-2"></div>
+        <span class="text-sm text-slate-600">Live</span>
+      </div>
+    </div>
+  </header>
+  
+  <main class="flex-1 w-full px-4 sm:px-6 lg:px-8 py-6 md:py-10">
+    <div class="container mx-auto">
+      <div id="content" class="flex flex-wrap gap-4 sm:gap-6 justify-start">
+        <div class="bg-white/80 backdrop-blur rounded-xl shadow-sm hover:shadow-md border border-slate-200 p-6 flex flex-col gap-4 transition-all duration-300 relative overflow-hidden group hover:border-primary-200 max-w-md w-full">
+          <div class="absolute h-1 bg-gradient-to-r from-primary-500 to-primary-400 top-0 left-0 right-0 opacity-80"></div>
+          <h2 class="text-xl font-semibold text-slate-800">Welcome!</h2>
+          <p class="text-slate-600">Your agent will paint here. Loading...</p>
+          <div class="animate-pulse flex space-x-4">
+            <div class="flex-1 space-y-4 py-1">
+              <div class="h-3 bg-slate-200 rounded w-3/4"></div>
+              <div class="space-y-2">
+                <div class="h-3 bg-slate-200 rounded"></div>
+                <div class="h-3 bg-slate-200 rounded w-5/6"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  
+  <footer class="bg-white/70 backdrop-blur-sm border-t border-slate-200 mt-auto">
+    <div class="container mx-auto px-4 h-12 md:h-14 flex items-center justify-center text-sm text-slate-600 font-medium">
+      Powered by <span class="text-primary-600 ml-1 font-semibold">MCP Display Server</span>
+    </div>
+  </footer>
+  
+  <script>
+    let lastUpdateTimestamp = 0;
+    let currentScript = '';
+    let scriptCounter = 0;
+
+    async function loadContent(){
+      try{
+        const res = await fetch("/current");
+        const data = await res.json();
+        if (data.timestamp && data.timestamp <= lastUpdateTimestamp) {
+          return;
+        }
+        lastUpdateTimestamp = data.timestamp || Date.now();
+        const contentEl = document.getElementById("content");
+        let htmlContent = data.body_html || "";
+        if (htmlContent.includes('<!DOCTYPE html>')) {
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(htmlContent, 'text/html');
+          const styles = doc.querySelectorAll('style');
+          styles.forEach(style => {
+            const styleKey = style.textContent.slice(0,50);
+            const escapedKey = CSS.escape(styleKey);
+            if (!document.querySelector(`style[data-canvas-style="${escapedKey}"]`)) {
+              const newStyle = document.createElement('style');
+              newStyle.textContent = style.textContent;
+              newStyle.setAttribute('data-canvas-style', styleKey);
+              document.head.appendChild(newStyle);
+            }
+          });
+          htmlContent = doc.body ? doc.body.innerHTML : htmlContent;
+        }
+        contentEl.innerHTML = htmlContent;
+        if (data.script_js && data.script_js !== currentScript) {
+          currentScript = data.script_js;
+          try {
+            const oldScript = document.querySelector('[data-canvas-script]');
+            if (oldScript) oldScript.remove();
+            const script = document.createElement("script");
+            script.setAttribute('data-canvas-script', ++scriptCounter);
+            script.innerHTML = data.script_js;
+            document.body.appendChild(script);
+          } catch (e) {
+            console.error('Script execution error:', e);
+          }
+        }
+      } catch(err) {
+        console.error("Error loading content:",err);
+        document.getElementById("content").innerHTML = `<div class="bg-white rounded-2xl shadow-lg border border-gray-200 p-8 flex flex-col gap-4"><h2 class="text-xl font-bold text-red-700">Error</h2><p class="text-gray-500">Failed to load content: ${err.message}</p></div>`;
+      }
+    }
+
+    // Load initial content and refresh every 2 seconds
+    loadContent();
+    setInterval(loadContent, 2000);
+  </script>
+</body>
+</html>
