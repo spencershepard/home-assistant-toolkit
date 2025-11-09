@@ -64,11 +64,27 @@ echo "   export PORCUPINE_ACCESS_KEY='your_access_key_here'"
 echo "   export WEBHOOK_URL='your_webhook_url_here'"
 echo ""
 
-# Configure audio settings for Raspberry Pi
-echo "Configuring audio settings..."
+# Audio configuration (optional)
+echo "Audio device information:"
+echo "Available audio devices:"
+arecord -l 2>/dev/null || echo "  (arecord not available yet - will show after package installation)"
+aplay -l 2>/dev/null || echo "  (aplay not available yet - will show after package installation)"
 
-# Create asound.conf for better audio handling
-sudo tee /etc/asound.conf > /dev/null <<EOF
+echo ""
+echo "🔊 Audio Configuration:"
+echo "The system will use default audio devices initially."
+echo "If you have audio issues, you can optionally configure custom device routing."
+echo ""
+read -p "Do you want to configure custom audio device routing? (y/N): " configure_audio
+
+if [[ $configure_audio =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Creating custom ALSA configuration..."
+    echo "Note: This assumes USB mic on hw:1,0 and built-in audio on hw:0,0"
+    echo "You may need to adjust these based on your actual device layout."
+    
+    sudo tee /etc/asound.conf > /dev/null <<EOF
+# Custom ALSA configuration for Raspberry Pi STT
 pcm.!default {
     type asym
     capture.pcm "mic"
@@ -78,17 +94,22 @@ pcm.!default {
 pcm.mic {
     type plug
     slave {
-        pcm "hw:1,0"
+        pcm "hw:1,0"  # USB microphone (adjust if needed)
     }
 }
 
 pcm.speaker {
     type plug
     slave {
-        pcm "hw:0,0"
+        pcm "hw:0,0"  # Built-in audio (adjust if needed)
     }
 }
 EOF
+    echo "✓ Custom audio configuration created"
+    echo "  If audio doesn't work, you can remove it with: sudo rm /etc/asound.conf"
+else
+    echo "✓ Skipping custom audio configuration - using system defaults"
+fi
 
 echo ""
 echo "🎯 Performance Optimizations for RPi 3:"
