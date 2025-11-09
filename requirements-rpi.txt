@@ -9,8 +9,8 @@ soundfile==0.13.1
 # Wake word detection (REQUIRED)
 pvporcupine==3.0.5
 
-# Speech-to-text (REQUIRED)
-faster-whisper==1.2.0
+# Speech-to-text (REQUIRED) - Using OpenAI whisper for better RPi compatibility
+openai-whisper==20231117
 
 # HTTP requests (REQUIRED)
 requests==2.32.5

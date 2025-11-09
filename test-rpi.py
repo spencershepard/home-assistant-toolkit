@@ -197,14 +197,31 @@ def test_whisper():
     """Test Whisper model loading."""
     print_header("WHISPER MODEL TEST")
     
+    # Try OpenAI Whisper first (better RPi compatibility)
+    try:
+        import whisper
+        print("Loading OpenAI Whisper model (this may take a moment)...")
+        model = whisper.load_model("tiny")
+        print("✓ OpenAI Whisper model loaded successfully")
+        return True
+    except ImportError:
+        print("OpenAI Whisper not available, trying Faster-Whisper...")
+    except Exception as e:
+        print(f"OpenAI Whisper failed: {e}")
+    
+    # Fallback to Faster-Whisper
     try:
         from faster_whisper import WhisperModel
-        print("Loading Whisper model (this may take a moment)...")
+        print("Loading Faster-Whisper model...")
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        print("✓ Whisper model loaded successfully")
+        print("✓ Faster-Whisper model loaded successfully")
         return True
+    except ImportError:
+        print("❌ Neither OpenAI Whisper nor Faster-Whisper available")
+        print("   Please install one: pip install openai-whisper")
+        return False
     except Exception as e:
-        print(f"❌ Error loading Whisper model: {e}")
+        print(f"❌ Error loading Faster-Whisper model: {e}")
         return False
 
 def test_environment():

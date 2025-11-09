@@ -1,7 +1,6 @@
 import sounddevice as sd
 import numpy as np
 import pvporcupine
-from faster_whisper import WhisperModel
 import requests
 from datetime import datetime
 import os
@@ -12,6 +11,21 @@ import dotenv
 import platform
 import wave
 import json
+
+# Whisper import with fallback options
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+    WHISPER_TYPE = "openai"
+except ImportError:
+    try:
+        from faster_whisper import WhisperModel
+        WHISPER_AVAILABLE = True
+        WHISPER_TYPE = "faster"
+    except ImportError:
+        WHISPER_AVAILABLE = False
+        WHISPER_TYPE = None
+        print("ERROR: No Whisper implementation available. Please install either 'openai-whisper' or 'faster-whisper'")
 
 # Optional imports for enhanced features (graceful degradation)
 try:
@@ -124,21 +138,36 @@ except Exception as e:
 
 # Initialize Whisper model with platform optimizations
 print("Initializing Whisper model...")
-if TORCH_AVAILABLE and torch.cuda.is_available() and not IS_RASPBERRY_PI:
-    # Only try GPU on non-RPi systems
-    try:
-        test_tensor = torch.tensor([1.0]).cuda()
-        print("CUDA test successful")
-        model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
-        print(f"Using GPU for Whisper ({WHISPER_MODEL_SIZE} model)")
-    except Exception as e:
-        print(f"GPU initialization failed: {e}")
+
+if not WHISPER_AVAILABLE:
+    print("ERROR: No Whisper implementation available!")
+    print("Please install either: pip install openai-whisper")
+    print("                   or: pip install faster-whisper")
+    exit(1)
+
+if WHISPER_TYPE == "openai":
+    # OpenAI Whisper (better RPi compatibility)
+    print(f"Using OpenAI Whisper ({WHISPER_MODEL_SIZE} model)")
+    model = whisper.load_model(WHISPER_MODEL_SIZE)
+    print("OpenAI Whisper model loaded successfully")
+    
+elif WHISPER_TYPE == "faster":
+    # Faster Whisper (if ctranslate2 is available)
+    if TORCH_AVAILABLE and torch.cuda.is_available() and not IS_RASPBERRY_PI:
+        # Only try GPU on non-RPi systems
+        try:
+            test_tensor = torch.tensor([1.0]).cuda()
+            print("CUDA test successful")
+            model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
+            print(f"Using GPU for Faster-Whisper ({WHISPER_MODEL_SIZE} model)")
+        except Exception as e:
+            print(f"GPU initialization failed: {e}")
+            model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
+            print(f"Falling back to CPU ({WHISPER_MODEL_SIZE} model)")
+    else:
+        # CPU-only for RPi and systems without CUDA
         model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
-        print(f"Falling back to CPU ({WHISPER_MODEL_SIZE} model)")
-else:
-    # CPU-only for RPi and systems without CUDA
-    model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
-    print(f"Using CPU for Whisper ({WHISPER_MODEL_SIZE} model, {WHISPER_COMPUTE_TYPE} precision)")
+        print(f"Using CPU for Faster-Whisper ({WHISPER_MODEL_SIZE} model, {WHISPER_COMPUTE_TYPE} precision)")
 
 # Initialize optional components
 encoder = None
@@ -187,6 +216,22 @@ def simple_energy_vad(audio_chunk, threshold=0.01):
     # Calculate RMS energy
     rms = np.sqrt(np.mean(audio_chunk ** 2))
     return rms > threshold
+
+def transcribe_audio(audio_file):
+    """Transcribe audio file using available Whisper implementation."""
+    if WHISPER_TYPE == "openai":
+        # OpenAI Whisper
+        result = model.transcribe(audio_file)
+        return result["text"].strip()
+    
+    elif WHISPER_TYPE == "faster":
+        # Faster Whisper
+        segments, _ = model.transcribe(audio_file, beam_size=5)
+        transcript = " ".join([getattr(seg, 'text', str(seg)) for seg in segments]).strip()
+        return transcript
+    
+    else:
+        return "No Whisper implementation available"
 
 def identify_speaker(wav_file):
     """Identify speaker from audio file. Returns 'unknown_speaker' if speaker ID is disabled."""
@@ -427,7 +472,7 @@ def main():
                             with ThreadPoolExecutor(max_workers=2) as executor:
                                 # Submit both tasks
                                 speaker_future = executor.submit(identify_speaker, wav_filename)
-                                transcribe_future = executor.submit(lambda: model.transcribe(wav_filename, beam_size=5))
+                                transcribe_future = executor.submit(transcribe_audio, wav_filename)
                                 
                                 # Wait for both to complete
                                 for future in as_completed([speaker_future, transcribe_future]):
@@ -436,8 +481,7 @@ def main():
                                         elapsed = (datetime.now() - wake_time).total_seconds()
                                         print(f"[{elapsed:.2f}s] Speaker identification complete: {speaker}")
                                     elif future == transcribe_future:
-                                        segments, _ = future.result()
-                                        transcript = " ".join([getattr(seg, 'text', str(seg)) for seg in segments]).strip()
+                                        transcript = future.result()
                                         elapsed = (datetime.now() - wake_time).total_seconds()
                                         print(f"[{elapsed:.2f}s] STT transcription complete: {transcript}")
 
