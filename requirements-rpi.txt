@@ -2,7 +2,6 @@
 # Core audio processing
 sounddevice==0.5.2
 soundfile==0.13.1
-numpy==1.24.4  # Stable version for RPi 3
 
 # Wake word detection
 pvporcupine==3.0.5
