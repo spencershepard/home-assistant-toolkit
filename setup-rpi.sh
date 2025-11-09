@@ -28,15 +28,16 @@ sudo apt install -y \
     git \
     build-essential \
     python3-dev \
-    libasound2-dev
+    libasound2-dev \
+    python3-numpy
 
 # Install audio tools for testing
 sudo apt install -y arecord aplay
 
 # Create virtual environment
 echo "Creating Python virtual environment..."
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate
 
 # Upgrade pip
 pip install --upgrade pip
