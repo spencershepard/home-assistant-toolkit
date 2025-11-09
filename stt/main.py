@@ -2,9 +2,6 @@ import sounddevice as sd
 import numpy as np
 import pvporcupine
 from faster_whisper import WhisperModel
-import torch
-import torchaudio
-from resemblyzer import VoiceEncoder, preprocess_wav
 import requests
 from datetime import datetime
 import os
@@ -12,13 +9,44 @@ import base64
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dotenv
+import platform
+import wave
+import json
+
+# Optional imports for enhanced features (graceful degradation)
+try:
+    import torch
+    import torchaudio
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("Warning: PyTorch not available, some features will be limited")
+
+try:
+    from resemblyzer import VoiceEncoder, preprocess_wav
+    RESEMBLYZER_AVAILABLE = True
+except ImportError:
+    RESEMBLYZER_AVAILABLE = False
+    print("Warning: Resemblyzer not available, speaker identification disabled")
+
+try:
+    if TORCH_AVAILABLE:
+        # Silero VAD - only load if torch is available
+        vad_model, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', force_reload=False)
+        (get_speech_timestamps, _, _, _, _) = utils
+        SILERO_VAD_AVAILABLE = True
+    else:
+        SILERO_VAD_AVAILABLE = False
+except Exception as e:
+    print(f"Warning: Silero VAD not available: {e}")
+    SILERO_VAD_AVAILABLE = False
 
 # -----------------------------
 # Configuration
 # -----------------------------
 # WAKE_WORD = "picovoice"            # Porcupine custom wake word
 SAMPLE_RATE = 16000
-DEVICE_INDEX = 2                       # None for default mic
+DEVICE_INDEX = None                    # None for default mic (better for RPi)
 CHUNK_SIZE = 512                       # audio chunk size
 STOP_SILENCE_SEC = 2.0                 # reduced from 3.0s to 2.0s for better balance
 PRE_BUFFER_SEC = 1.0                   # seconds of audio to keep before wake word
@@ -30,10 +58,27 @@ ACCESS_KEY = os.getenv("PORCUPINE_ACCESS_KEY")
 # Get script directory for resource paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Detect platform for optimizations
+IS_RASPBERRY_PI = platform.machine().lower().startswith('arm') or 'raspi' in platform.uname().node.lower()
+IS_LINUX = platform.system().lower() == 'linux'
+
+# Raspberry Pi specific optimizations
+if IS_RASPBERRY_PI:
+    print("Raspberry Pi detected - applying optimizations")
+    CHUNK_SIZE = 1024  # Larger chunks for better performance on RPi
+    # Use lighter models
+    WHISPER_MODEL_SIZE = "tiny"  # Much faster on RPi
+    WHISPER_COMPUTE_TYPE = "int8"  # Lower precision for speed
+else:
+    WHISPER_MODEL_SIZE = "medium"
+    WHISPER_COMPUTE_TYPE = "float16" if TORCH_AVAILABLE else "int8"
+
 
 # -----------------------------
 # Debugging
 # -----------------------------
+print(f"Platform: {platform.system()} {platform.machine()}")
+print(f"Is Raspberry Pi: {IS_RASPBERRY_PI}")
 print(f"Using device index: {DEVICE_INDEX}")
 print(f"Webhook URL: {WEBHOOK_URL}")
 print(f"Available audio devices: {sd.query_devices()}")
@@ -41,77 +86,136 @@ print(f"Available audio devices: {sd.query_devices()}")
 # -----------------------------
 # Initialize models
 # -----------------------------
-porcupine = pvporcupine.create(
-    access_key=ACCESS_KEY,
-    keyword_paths=[os.path.join(SCRIPT_DIR, "resources", "Hey-Dude_en_windows_v3_0_0.ppn")],
-    # keywords=[WAKE_WORD]
+# Initialize Porcupine with platform-specific wake word file
+def get_porcupine_keyword_path():
+    """Get the appropriate porcupine keyword file for the current platform."""
+    resources_dir = os.path.join(SCRIPT_DIR, "resources")
+    
+    if IS_RASPBERRY_PI or IS_LINUX:
+        # Try to find Linux/RPi specific keyword file
+        linux_keyword = os.path.join(resources_dir, "Hey-Dude_en_raspberry-pi_v3_0_0.ppn")
+        if os.path.exists(linux_keyword):
+            return linux_keyword
+        # Fallback to a generic Linux keyword if available
+        linux_generic = os.path.join(resources_dir, "Hey-Dude_en_linux_v3_0_0.ppn")
+        if os.path.exists(linux_generic):
+            return linux_generic
+    
+    # Default to Windows keyword (may work on some platforms)
+    windows_keyword = os.path.join(resources_dir, "Hey-Dude_en_windows_v3_0_0.ppn")
+    if os.path.exists(windows_keyword):
+        print("Warning: Using Windows keyword file on non-Windows platform - this may not work properly")
+        return windows_keyword
+    
+    raise FileNotFoundError("No suitable Porcupine keyword file found for this platform")
+
+try:
+    keyword_path = get_porcupine_keyword_path()
+    print(f"Using keyword file: {keyword_path}")
+    porcupine = pvporcupine.create(
+        access_key=ACCESS_KEY,
+        keyword_paths=[keyword_path],
     )
+    print("Porcupine wake word detection initialized successfully")
+except Exception as e:
+    print(f"Error initializing Porcupine: {e}")
+    print("You may need to download the appropriate .ppn file for your platform")
+    raise
 
-
-# Check CUDA availability and force GPU usage
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA device: {torch.cuda.get_device_name()}")
-    print(f"CUDA version: {torch.version.cuda}")
-
-# Whisper GPU model with proper CUDA check
-if torch.cuda.is_available():
+# Initialize Whisper model with platform optimizations
+print("Initializing Whisper model...")
+if TORCH_AVAILABLE and torch.cuda.is_available() and not IS_RASPBERRY_PI:
+    # Only try GPU on non-RPi systems
     try:
-        # Test CUDA with a simple operation first
         test_tensor = torch.tensor([1.0]).cuda()
         print("CUDA test successful")
-        
-        model = WhisperModel("medium", device="cuda", compute_type="float16")
-        print("Using GPU for Whisper")
+        model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
+        print(f"Using GPU for Whisper ({WHISPER_MODEL_SIZE} model)")
     except Exception as e:
         print(f"GPU initialization failed: {e}")
-        model = WhisperModel("medium", device="cpu", compute_type="int8")
-        print("Falling back to CPU")
+        model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
+        print(f"Falling back to CPU ({WHISPER_MODEL_SIZE} model)")
 else:
-    print("CUDA not available, using CPU")
-    model = WhisperModel("medium", device="cpu", compute_type="int8")
+    # CPU-only for RPi and systems without CUDA
+    model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
+    print(f"Using CPU for Whisper ({WHISPER_MODEL_SIZE} model, {WHISPER_COMPUTE_TYPE} precision)")
 
-# Silero VAD
-vad_model, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', force_reload=False)
-(get_speech_timestamps, _, _, _, _) = utils
-
-# Resemblyzer
-encoder = VoiceEncoder()
+# Initialize optional components
+encoder = None
 speaker_db = {}  # {'Alice': embedding, 'Bob': embedding} for known family members
+
+if RESEMBLYZER_AVAILABLE:
+    try:
+        encoder = VoiceEncoder()
+        print("Resemblyzer speaker identification enabled")
+    except Exception as e:
+        print(f"Error initializing Resemblyzer: {e}")
+        RESEMBLYZER_AVAILABLE = False
+else:
+    print("Resemblyzer not available - speaker identification disabled")
 
 # -----------------------------
 # Helper functions
 # -----------------------------
 def is_speech(audio_chunk):
-    tensor = torch.tensor(audio_chunk, dtype=torch.float32)
-    speech_segments = get_speech_timestamps(
-        tensor, 
-        vad_model, 
-        sampling_rate=SAMPLE_RATE,
-        # Tunable parameters:
-        threshold=0.27,              # Adjusted from 0.25 to 0.27 - slightly less sensitive
-        min_speech_duration_ms=200,  # Short enough to catch brief utterances
-        max_speech_duration_s=float('inf'), 
-        min_silence_duration_ms=250, # Adjusted from 300 to 250
-        window_size_samples=512,
-        speech_pad_ms=50
-    )
-    return len(speech_segments) > 0
+    """Detect speech in audio chunk using available VAD methods."""
+    if SILERO_VAD_AVAILABLE and TORCH_AVAILABLE:
+        # Use Silero VAD if available
+        tensor = torch.tensor(audio_chunk, dtype=torch.float32)
+        speech_segments = get_speech_timestamps(
+            tensor, 
+            vad_model, 
+            sampling_rate=SAMPLE_RATE,
+            # Tunable parameters:
+            threshold=0.27,              # Adjusted from 0.25 to 0.27 - slightly less sensitive
+            min_speech_duration_ms=200,  # Short enough to catch brief utterances
+            max_speech_duration_s=float('inf'), 
+            min_silence_duration_ms=250, # Adjusted from 300 to 250
+            window_size_samples=512,
+            speech_pad_ms=50
+        )
+        return len(speech_segments) > 0
+    else:
+        # Fallback to simple energy-based VAD
+        return simple_energy_vad(audio_chunk)
+
+def simple_energy_vad(audio_chunk, threshold=0.01):
+    """Simple energy-based voice activity detection for when Silero VAD is not available."""
+    if len(audio_chunk) == 0:
+        return False
+    
+    # Calculate RMS energy
+    rms = np.sqrt(np.mean(audio_chunk ** 2))
+    return rms > threshold
 
 def identify_speaker(wav_file):
-    wav = preprocess_wav(wav_file)
-    emb = encoder.embed_utterance(wav)
-    if not speaker_db:
+    """Identify speaker from audio file. Returns 'unknown_speaker' if speaker ID is disabled."""
+    if not RESEMBLYZER_AVAILABLE or encoder is None:
         return "unknown_speaker"
-    # Compare embeddings (cosine similarity)
-    best_match, best_score = "unknown_speaker", -1
-    for name, ref_emb in speaker_db.items():
-        score = np.dot(emb, ref_emb) / (np.linalg.norm(emb) * np.linalg.norm(ref_emb))
-        if score > best_score:
-            best_score, best_match = score, name
-    return best_match
+    
+    try:
+        wav = preprocess_wav(wav_file)
+        emb = encoder.embed_utterance(wav)
+        if not speaker_db:
+            return "unknown_speaker"
+        
+        # Compare embeddings (cosine similarity)
+        best_match, best_score = "unknown_speaker", -1
+        for name, ref_emb in speaker_db.items():
+            score = np.dot(emb, ref_emb) / (np.linalg.norm(emb) * np.linalg.norm(ref_emb))
+            if score > best_score:
+                best_score, best_match = score, name
+        return best_match
+    except Exception as e:
+        print(f"Error in speaker identification: {e}")
+        return "unknown_speaker"
 
 def send_to_n8n(speaker, text, wav_file, wake_time=None):
+    """Send audio and transcript to webhook endpoint."""
+    if not WEBHOOK_URL:
+        print("No webhook URL configured - skipping webhook")
+        return
+        
     try:
         with open(wav_file, "rb") as f:
             audio_data = f.read()
@@ -196,15 +300,39 @@ def play_audio(b64_data):
     except Exception as e:
         print(f"Error playing audio: {e}")
 
+def save_audio_wav(audio_data, filename, sample_rate=16000):
+    """Save audio data as WAV file using wave module (fallback when torchaudio not available)."""
+    try:
+        if TORCH_AVAILABLE and torchaudio:
+            # Use torchaudio if available
+            torchaudio_tensor = torch.tensor(audio_data).unsqueeze(0)
+            torchaudio.save(filename, torchaudio_tensor, sample_rate)
+        else:
+            # Fallback to wave module
+            # Convert float32 audio to int16
+            audio_int16 = (audio_data * 32767).astype(np.int16)
+            
+            with wave.open(filename, 'wb') as wav_file:
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(audio_int16.tobytes())
+        
+        return True
+    except Exception as e:
+        print(f"Error saving audio file {filename}: {e}")
+        return False
+
 def play_sound_file(file_path):
     """Play a sound file using system command"""
     try:
         if os.name == 'nt':  # Windows
             os.startfile(file_path)
-        elif os.uname().sysname == 'Darwin':  # macOS
+        elif platform.system() == 'Darwin':  # macOS
             os.system(f'afplay "{file_path}"')
-        else:  # Linux and others
-            os.system(f'aplay "{file_path}"')
+        else:  # Linux and others (including Raspberry Pi)
+            # Use aplay for Linux/RPi
+            os.system(f'aplay "{file_path}" 2>/dev/null')
     except Exception as e:
         print(f"Error playing sound file {file_path}: {e}")
 
@@ -275,6 +403,7 @@ def main():
                     # 2. OR maximum recording time has been reached
                     if (silence > STOP_SILENCE_SEC and recording_duration > MIN_RECORDING_SEC and len(audio_buffer) > SAMPLE_RATE) or \
                        (recording_duration > MAX_RECORDING_SEC):
+                        assert wake_time is not None, "wake_time should not be None when processing audio"
                         elapsed = (datetime.now() - wake_time).total_seconds()
                         reason = "silence detected" if silence > STOP_SILENCE_SEC else "maximum recording time reached"
                         print(f"[{elapsed:.2f}s] Speech ended ({reason}), processing... (includes {PRE_BUFFER_SEC}s pre-buffer)")
@@ -284,8 +413,9 @@ def main():
                         try:
                             # Save WAV for Resemblyzer and Whisper
                             full_audio = np.array(audio_buffer).astype(np.float32) / 32768.0
-                            torchaudio_tensor = torch.tensor(full_audio).unsqueeze(0)
-                            torchaudio.save(wav_filename, torchaudio_tensor, SAMPLE_RATE)
+                            if not save_audio_wav(full_audio, wav_filename, SAMPLE_RATE):
+                                print("Failed to save audio file")
+                                continue
 
                             # Run speaker identification and transcription in parallel
                             elapsed = (datetime.now() - wake_time).total_seconds()
@@ -307,7 +437,7 @@ def main():
                                         print(f"[{elapsed:.2f}s] Speaker identification complete: {speaker}")
                                     elif future == transcribe_future:
                                         segments, _ = future.result()
-                                        transcript = " ".join([seg.text for seg in segments]).strip()
+                                        transcript = " ".join([getattr(seg, 'text', str(seg)) for seg in segments]).strip()
                                         elapsed = (datetime.now() - wake_time).total_seconds()
                                         print(f"[{elapsed:.2f}s] STT transcription complete: {transcript}")
 
